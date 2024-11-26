@@ -4,10 +4,9 @@ import os
 import shutil
 import asyncio
 from typing import List
-from chatbot_internal import PersistentProjectProcessor
+from chatbot_t import PersistentProjectProcessor
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
 load_dotenv()
 
 app = FastAPI()
@@ -26,27 +25,6 @@ async def initialize_processor():
     await processor.initialize()
     print("Initialization complete.")
 
-
-@app.post("/upload-pdf/")
-async def upload_pdf(file: UploadFile = File(...)):
-    """
-    Endpoint to upload a PDF file for processing.
-    """
-    try:
-        if not file.filename.endswith(".pdf"):
-            raise HTTPException(status_code=400, detail="Only PDF files are supported.")
-
-        file_path = os.path.join(PDF_FOLDER, file.filename)
-        with open(file_path, "wb") as f:
-            shutil.copyfileobj(file.file, f)
-
-        # Reinitialize processor after upload
-        await processor.initialize()
-        return {"detail": f"Uploaded and processed {file.filename}"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @app.get("/query-projects/")
 async def query_projects(query: str):
     """
@@ -61,38 +39,56 @@ async def query_projects(query: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# @app.post("/upload-pdf/")
+# async def upload_pdf(file: UploadFile = File(...)):
+#     """
+#     Endpoint to upload a PDF file for processing.
+#     """
+#     try:
+#         if not file.filename.endswith(".pdf"):
+#             raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
-@app.get("/projects/")
-async def list_projects():
-    """
-    Endpoint to list all processed projects.
-    """
-    try:
-        projects = [
-            {
-                "name": project.name,
-                "technologies": list(project.technologies),
-                "description": project.description,
-                "developers": list(project.developers),
-                "platforms": list(project.platforms),
-                "file_source": project.file_source,
-                "pages": list(project.page_numbers),
-            }
-            for project in processor.projects.values()
-        ]
-        return JSONResponse(content={"projects": projects})
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+#         file_path = os.path.join(PDF_FOLDER, file.filename)
+#         with open(file_path, "wb") as f:
+#             shutil.copyfileobj(file.file, f)
+
+#         # Reinitialize processor after upload
+#         await processor.initialize()
+#         return {"detail": f"Uploaded and processed {file.filename}"}
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=str(e))
+
+# @app.get("/projects/")
+# async def list_projects():
+#     """
+#     Endpoint to list all processed projects.
+#     """
+#     try:
+#         projects = [
+#             {
+#                 "name": project.name,
+#                 "technologies": list(project.technologies),
+#                 "description": project.description,
+#                 "developers": list(project.developers),
+#                 "platforms": list(project.platforms),
+#                 "file_source": project.file_source,
+#                 "pages": list(project.page_numbers),
+#             }
+#             for project in processor.projects.values()
+#         ]
+#         return JSONResponse(content={"projects": projects})
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/process-pdfs/")
-async def process_pdfs():
-    """
-    Endpoint to process all PDFs in the specified folder.
-    """
-    try:
-        await processor.process_pdfs()
-        await processor.save_cached_data()
-        return {"detail": "Processed all PDFs and updated cache."}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+# @app.post("/process-pdfs/")
+# async def process_pdfs():
+#     """
+#     Endpoint to process all PDFs in the specified folder.
+#     """
+#     try:
+#         await processor.process_pdfs()
+#         await processor.save_cached_data()
+#         return {"detail": "Processed all PDFs and updated cache."}
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=str(e))
