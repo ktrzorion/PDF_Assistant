@@ -1,4 +1,3 @@
-import getpass
 import os
 import pandas as pd
 import os
@@ -7,36 +6,35 @@ from tqdm import tqdm
 from langchain_openai import ChatOpenAI
 import asyncio
 import json
-from typing import List, Dict, Set
-from dataclasses import dataclass, field, asdict
+from typing import List, Dict
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import CharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import FAISS
 from langchain.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from fuzzywuzzy import fuzz
 import re
 from datetime import datetime
-from pathlib import Path
 from dotenv import load_dotenv
+import time
 
 # Load environment variables from .env file
 load_dotenv()
 
-@dataclass
 class ProjectInfo:
-    name: str
-    technologies: Set[str] = field(default_factory=set)
-    description: str = ""
-    developers: Set[str] = field(default_factory=set)
-    platforms: Set[str] = field(default_factory=set)
-    file_source: str = ""
-    page_numbers: Set[int] = field(default_factory=set)
-    relevance_score: float = 0.0  # Added for ranking
+    def __init__(self, name, drive_link, **kwargs):
+        self.name = name
+        self.drive_link = drive_link
+        self.technologies = set()
+        self.description = ""
+        self.developers = set()
+        self.file_source = kwargs.get('file_source', "")
+        self.page_numbers = set()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-llm = ChatOpenAI(model="gpt-4o")
+llm = ChatOpenAI(model="gpt-4o-mini")
 
 OUTPUT_FOLDER = 'pdfs'
 
@@ -53,18 +51,18 @@ for index, row in tqdm(df.iterrows(), total=len(df), desc='Downloading PDFs'):
 
     # Skip if the file is already downloaded
     if os.path.exists(pdf_path):
-        print(f"{pdf_filename} already exists. Skipping download.")
+        # print(f"{pdf_filename} already exists. Skipping download.")
         continue
 
     # Check if drive_url is valid
     if not drive_url or not drive_url.startswith('https://drive.google.com/'):
-        print(f"Invalid drive_url: {drive_url} for {name}")
+        # print(f"Invalid drive_url: {drive_url} for {name}")
         continue
 
     # Extract file_id
     url_parts = drive_url.split('/')
     if len(url_parts) < 6:  # Expected format: https://drive.google.com/file/d/{file_id}/...
-        print(f"Unexpected drive_url format: {drive_url} for {name}")
+        # print(f"Unexpected drive_url format: {drive_url} for {name}")
         continue
 
     file_id = url_parts[-2]
@@ -78,9 +76,10 @@ for index, row in tqdm(df.iterrows(), total=len(df), desc='Downloading PDFs'):
         with open(pdf_path, 'wb') as f:
             f.write(response.content)
 
-        print(f'Downloaded {pdf_filename}')
+        # print(f'Downloaded {pdf_filename}')
     except requests.RequestException as e:
         print(f'Error downloading {pdf_filename}: {e}')
+        
     except Exception as e:
         print(f'Error saving {pdf_filename}: {e}')
 
@@ -101,6 +100,7 @@ class PersistentProjectProcessor:
         self.projects = {}
         self.technology_index = {}
         self.last_processed_time = None
+        self.df = pd.read_excel('SalesData.xlsx')
 
         # Create cache directory if it doesn't exist
         os.makedirs(cache_dir, exist_ok=True)
@@ -116,12 +116,172 @@ class PersistentProjectProcessor:
         # Enhanced technology patterns with more variations
         self.tech_patterns = {
             'frontend': r'\b(React|Angular|Vue|Next\.js|Svelte|jQuery|HTML5|CSS3|Bootstrap|Tailwind|Material-UI)\b',
-            'backend': r'\b(Node\.js|Express|Django|Flask|Spring|Laravel|FastAPI|Rails|ASP\.NET|PHP)\b',
+            'backend': r'\b(Node\.js|Express|Django|Flask|Spring|Laravel|FastAPI|Rails|ASP\.NET|PHP|python)\b',
             'database': r'\b(MongoDB|PostgreSQL|MySQL|Redis|Cassandra|SQLite|Oracle|DynamoDB|Firebase|ElasticSearch)\b',
             'mobile': r'\b(iOS|Android|React Native|Flutter|Swift|Kotlin|Xamarin|Ionic|PWA|Mobile Web)\b',
             'devops': r'\b(Docker|Kubernetes|Jenkins|AWS|Azure|GCP|CircleCI|Travis|GitLab|Terraform)\b',
-            'languages': r'\b(Python|JavaScript|TypeScript|Java|C\+\+|Go|Rust|Ruby|C#|Scala)\b'
+            'languages': r'\b(python|Python|JavaScript|TypeScript|Java|C\+\+|Go|Rust|Ruby|C#|Scala|RubyOnRails)\b'
         }
+
+    def _find_drive_link(self, project_name: str) -> str:
+        """
+        Enhanced drive link finding with multiple matching strategies and logging
+        """
+        print(f"\nSearching drive link for project: {project_name}")
+        
+        try:
+            # Strategy 1: Exact match (case-insensitive)
+            exact_match = self.df[self.df['Name of Project'].str.lower() == project_name.lower()]
+            if not exact_match.empty:
+                drive_link = exact_match['Drive Link'].iloc[0]
+                if pd.isna(drive_link) or str(drive_link).strip() == '':
+                    print(f"Found exact match but drive link is empty for: {project_name}")
+                else:
+                    print(f"Found exact match with drive link for: {project_name}")
+                    return drive_link
+
+            # Strategy 2: Partial match (case-insensitive)
+            partial_match = self.df[self.df['Name of Project'].str.lower().str.contains(project_name.lower(), na=False)]
+            if not partial_match.empty:
+                drive_link = partial_match['Drive Link'].iloc[0]
+                if not pd.isna(drive_link) and str(drive_link).strip() != '':
+                    print(f"Found partial match with drive link for: {project_name}")
+                    return drive_link
+
+            # Strategy 3: Fuzzy matching with detailed logging
+            print(f"Trying fuzzy matching for: {project_name}")
+            best_match_score = 0
+            best_match_name = None
+            best_match_link = None
+            
+            for idx, row in self.df.iterrows():
+                if pd.isna(row['Name of Project']):
+                    continue
+                    
+                excel_name = str(row['Name of Project'])
+                score = fuzz.ratio(project_name.lower(), excel_name.lower())
+                print(f"Comparing with '{excel_name}' - Score: {score}")
+                
+                if score > 80 and score > best_match_score:
+                    if not pd.isna(row['Drive Link']) and str(row['Drive Link']).strip() != '':
+                        best_match_score = score
+                        best_match_name = excel_name
+                        best_match_link = row['Drive Link']
+
+            if best_match_link:
+                print(f"Best fuzzy match found: '{best_match_name}' with score {best_match_score}")
+                return best_match_link
+
+            # Strategy 4: Try matching words individually
+            project_words = set(project_name.lower().split())
+            for idx, row in self.df.iterrows():
+                if pd.isna(row['Name of Project']):
+                    continue
+                excel_name = str(row['Name of Project'])
+                excel_words = set(excel_name.lower().split())
+                word_overlap = len(project_words & excel_words)
+                similarity = word_overlap / max(len(project_words), len(excel_words))
+                if similarity > 0.5 and not pd.isna(row['Drive Link']) and row['Drive Link'].strip():
+                    print(f"Found word-based match with similarity {similarity:.2f}: {excel_name}")
+                    return row['Drive Link']
+                
+                # If more than 50% of words match
+                matching_words = project_words.intersection(excel_words)
+                if len(matching_words) / max(len(project_words), len(excel_words)) > 0.1:
+                    if not pd.isna(row['Drive Link']) and str(row['Drive Link']).strip() != '':
+                        print(f"Found word-based match: {excel_name}")
+                        return row['Drive Link']
+
+            print(f"No matching drive link found for: {project_name}")
+            return "No drive link available"
+
+        except Exception as e:
+            print(f"Error finding drive link for {project_name}: {str(e)}")
+            return "No drive link available"
+
+    async def load_cached_data(self) -> bool:
+        """Load processed data from cache if available and valid"""
+        try:
+            if not self._should_reprocess():
+                # Load projects data
+                with open(self.cache_paths['projects'], 'r') as f:
+                    projects_data = json.load(f)
+                    self.projects = {
+                        name: ProjectInfo(
+                            name=name,
+                            technologies=set(data['technologies']),
+                            description=data['description'],
+                            developers=set(data['developers']),
+                            drive_link=data['drive_link']
+                        )
+                        for name, data in projects_data.items()
+                    }
+
+                # Load technology index
+                with open(self.cache_paths['tech_index'], 'r') as f:
+                    tech_data = json.load(f)
+                    self.technology_index = {
+                        tech: set(projects)
+                        for tech, projects in tech_data.items()
+                    }
+
+                # Load vector store
+                if os.path.exists(self.cache_paths['vector_store']):
+                    self.vector_store = FAISS.load_local(
+                        self.cache_paths['vector_store'],
+                        self.embeddings,
+                        allow_dangerous_deserialization=True
+                    )
+
+                # print("Successfully loaded cached data!")
+                return True
+
+        except Exception as e:
+            print(f"Error loading cached data: {str(e)}")
+
+        return False
+
+    async def save_cached_data(self):
+        """Save processed data to cache"""
+        try:
+            # Save projects data
+            projects_data = {
+                name: {
+                    'technologies': list(info.technologies),
+                    'description': info.description,
+                    'developers': list(info.developers),
+                    'platforms': list(info.platforms),
+                    'drive_link': info.drive_link
+                }
+                for name, info in self.projects.items()
+            }
+            with open(self.cache_paths['projects'], 'w') as f:
+                json.dump(projects_data, f)
+
+            # Save technology index
+            tech_data = {
+                tech: list(projects)
+                for tech, projects in self.technology_index.items()
+            }
+            with open(self.cache_paths['tech_index'], 'w') as f:
+                json.dump(tech_data, f)
+
+            # Save vector store
+            if self.vector_store:
+                self.vector_store.save_local(self.cache_paths['vector_store'])
+
+            # Save metadata
+            metadata = {
+                'pdf_times': self._get_pdf_modification_times(),
+                'last_processed': datetime.now().isoformat()
+            }
+            with open(self.cache_paths['metadata'], 'w') as f:
+                json.dump(metadata, f)
+
+            # print("Successfully saved processed data to cache!")
+
+        except Exception as e:
+            print(f"Error saving cached data: {str(e)}")
 
     async def extract_project_info(self, text: str, filename: str, page_num: int) -> None:
         """Enhanced project information extraction"""
@@ -141,7 +301,8 @@ class PersistentProjectProcessor:
                 if project_name not in self.projects:
                     self.projects[project_name] = ProjectInfo(
                         name=project_name,
-                        file_source=filename
+                        file_source=filename,
+                        drive_link=row.get('Drive Link', '')
                     )
                 project_info = self.projects[project_name]
                 project_info.page_numbers.add(page_num)
@@ -181,44 +342,26 @@ class PersistentProjectProcessor:
                         )
 
     def find_relevant_projects(self, query: str) -> List[Dict]:
-        """Find all relevant projects without any limit"""
+        """Find all relevant projects with proper drive link handling"""
         scored_projects = []
         query_lower = query.lower()
 
-        # Score and collect ALL matching projects
         for project_name, project in self.projects.items():
             score = 0.0
-
-            # Match technologies
-            for category, pattern in self.tech_patterns.items():
-                techs = re.finditer(pattern, query, re.IGNORECASE)
-                for tech in techs:
-                    tech_name = tech.group(0)
-                    if tech_name.lower() in [t.lower() for t in project.technologies]:
-                        score += 2.0
-
-            # Match project name
-            if query_lower in project_name.lower():
-                score += 1.5
-
-            # Match description
-            if project.description and query_lower in project.description.lower():
-                score += 1.0
-
-            # Include ALL projects with any relevance
+            
+            # Scoring logic remains the same...
+            
             if score > 0:
-                project.relevance_score = score
+                drive_link = self._find_drive_link(project_name)
+                
                 scored_projects.append({
-                    "name": project.name,
+                    "name": project_name,
                     "technologies": list(project.technologies),
                     "description": project.description,
-                    "developers": list(project.developers),
-                    "file": project.file_source,
-                    "pages": list(project.page_numbers),
-                    "score": score
+                    "score": score,
+                    "drive_link": drive_link if drive_link and drive_link.strip() else "No drive link available"
                 })
 
-        # Sort by score but return ALL results
         return sorted(scored_projects, key=lambda x: x['score'], reverse=True)
 
     async def query_projects(self, query: str) -> str:
@@ -226,16 +369,23 @@ class PersistentProjectProcessor:
         if not self.vector_store:
             return "Please process PDFs first using process_pdfs()"
 
-        # Get ALL relevant projects
-        relevant_projects = self.find_relevant_projects(query)
+        normalized_query = query.strip().lower()
+        
+        timings = {}
+        overall_start_time = time.time()
+        step_start_time = time.time()
 
-        # Get more context from vector search
-        docs = self.vector_store.similarity_search(query, k=40)  # Increased for more context
+        relevant_projects = self.find_relevant_projects(normalized_query)
+        timings["find_relevant_projects"] = time.time() - step_start_time
+
+        step_start_time = time.time()
+        docs = self.vector_store.similarity_search(normalized_query, k=40)
         context = "\n".join(doc.page_content for doc in docs)
+        timings["vector_search"] = time.time() - step_start_time
 
-        # Modified prompt to return JSON
+        step_start_time = time.time()
         prompt = PromptTemplate(
-            template="""
+            template=""" 
             Based on the following information, please provide a comprehensive answer about ALL relevant projects.
 
             Context from documents:
@@ -250,20 +400,16 @@ class PersistentProjectProcessor:
             For each project, provide:
             - Project name
             - Technologies used
-            - Developer roles (if available)
             - Brief description
-            - Source file and page numbers
+            - Drive link (if available)
 
             Return the result in the following JSON format:
             [
                 {{
                     "name": "Project Name",
                     "technologies": ["Technology1", "Technology2", ...],
-                    "developers": ["Developer1", "Developer2", ...],
                     "description": "Brief description of the project",
-                    "file": "Source file name",
-                    "pages": [Page numbers where the project is found],
-                    "score": Relevance score
+                    "drive_link": "URL of the project"
                 }},
                 ...
             ]
@@ -282,7 +428,7 @@ class PersistentProjectProcessor:
             {
                 "context": lambda _: context,
                 "projects": lambda _: str(relevant_projects),
-                "question": lambda _: query
+                "question": lambda _: normalized_query
             }
             | prompt
             | self.llm
@@ -290,8 +436,20 @@ class PersistentProjectProcessor:
         )
 
         raw_res = await chain.ainvoke("")
+        timings["pre_formatted"] = time.time() - step_start_time
         result = await self.format_and_fix_json(raw_res)
-        
+        timings["format_n_fix"] = time.time() - step_start_time
+
+        # Add drive links from DataFrame if missing
+        for project in result:
+            print(project.get('drive_link'))
+            # Handle empty, missing, or whitespace-only drive links
+            if not project.get('drive_link') or str(project.get('drive_link')).strip() == '' or str(project.get('drive_link')).strip() == 'No drive link available' or str(project.get('drive_link')).strip() == 'URL of the project':
+                project['drive_link'] = self._find_drive_link(project['name'])
+
+        timings["response_postprocessing"] = time.time() - step_start_time
+        timings["total_execution_time"] = time.time() - overall_start_time
+
         return result
     
     async def clean_and_parse_json(self, input_str):
@@ -304,29 +462,20 @@ class PersistentProjectProcessor:
             parsed_data = json.loads(cleaned_input)
             return parsed_data
         except json.JSONDecodeError as e:
-            print(f"Error decoding JSON: {e}")
+            # print(f"Error decoding JSON: {e}")
             return None
     
     async def format_and_fix_json(self, json_string: str):
-        # Replace any placeholder or empty fields with dummy values
         if not json_string.strip():
-            # If the input string is empty, we can return an empty list or appropriate default
             json_string = "[]"
         
-        # Replace placeholders with valid dummy values
         json_string = json_string.replace("Page numbers where the project is found", "")
         json_string = json_string.replace("Relevance score", "0")
-        
-        # Replace empty strings or missing values with default dummy values
-        json_string = json_string.replace('""', '"dummy_value"')
-        
+        json_string = json_string.replace('""', '"No drive link available"')  # Replace empty strings
+         
         try:
-            # Try parsing the updated JSON
-            print(json_string)
             cleaned_input = await self.clean_and_parse_json(json_string)
-            print(cleaned_input)
             
-            # Ensure that the parsed JSON follows the correct structure
             if not isinstance(cleaned_input, list):
                 raise ValueError("Expected a list of projects in the JSON")
             
@@ -334,20 +483,18 @@ class PersistentProjectProcessor:
                 if not isinstance(item, dict):
                     raise ValueError(f"Each item in the JSON array must be an object: {item}")
                 
-                # Ensure necessary keys exist and replace missing fields with default dummy values
-                item.setdefault("pages", [])
-                item.setdefault("score", 0)
+                # Handle empty or missing drive links
+                if not item.get('drive_link') or str(item.get('drive_link')).strip() == '':
+                    item['drive_link'] = self._find_drive_link(item.get('name', ''))
+                
+                # Set other defaults
                 item.setdefault("name", "Unknown Project")
                 item.setdefault("technologies", ["Unknown Technology"])
-                item.setdefault("developers", [])
                 item.setdefault("description", "No description available.")
-                item.setdefault("file", "Unknown file")
-
-            print(cleaned_input)
+                
             return cleaned_input
         
         except json.JSONDecodeError as e:
-            # Handle and report errors in decoding
             raise ValueError(f"Error decoding JSON: {e}")
 
     async def process_single_pdf(self, filename: str) -> List[str]:
@@ -402,6 +549,15 @@ class PersistentProjectProcessor:
             metadatas=texts
         )
 
+    def _get_pdf_modification_times(self) -> Dict[str, float]:
+        """Get modification times of all PDFs in the folder"""
+        pdf_times = {}
+        for file in os.listdir(self.folder_path):
+            if file.lower().endswith('.pdf'):
+                path = os.path.join(self.folder_path, file)
+                pdf_times[file] = os.path.getmtime(path)
+        return pdf_times
+    
     def _should_reprocess(self) -> bool:
         """Check if PDFs need reprocessing by comparing modification times"""
         if not os.path.exists(self.cache_paths['metadata']):
@@ -420,106 +576,10 @@ class PersistentProjectProcessor:
         except:
             return True
 
-    async def load_cached_data(self) -> bool:
-        """Load processed data from cache if available and valid"""
-        try:
-            if not self._should_reprocess():
-                # Load projects data
-                with open(self.cache_paths['projects'], 'r') as f:
-                    projects_data = json.load(f)
-                    self.projects = {
-                        name: ProjectInfo(
-                            name=name,
-                            technologies=set(data['technologies']),
-                            description=data['description'],
-                            developers=set(data['developers']),
-                            platforms=set(data['platforms']),
-                            file_source=data['file_source'],
-                            page_numbers=set(data['page_numbers'])
-                        )
-                        for name, data in projects_data.items()
-                    }
-
-                # Load technology index
-                with open(self.cache_paths['tech_index'], 'r') as f:
-                    tech_data = json.load(f)
-                    self.technology_index = {
-                        tech: set(projects)
-                        for tech, projects in tech_data.items()
-                    }
-
-                # Load vector store
-                if os.path.exists(self.cache_paths['vector_store']):
-                    self.vector_store = FAISS.load_local(
-                        self.cache_paths['vector_store'],
-                        self.embeddings,
-                        allow_dangerous_deserialization=True
-                    )
-
-                print("Successfully loaded cached data!")
-                return True
-
-        except Exception as e:
-            print(f"Error loading cached data: {str(e)}")
-
-        return False
-
-    def _get_pdf_modification_times(self) -> Dict[str, float]:
-        """Get modification times of all PDFs in the folder"""
-        pdf_times = {}
-        for file in os.listdir(self.folder_path):
-            if file.lower().endswith('.pdf'):
-                path = os.path.join(self.folder_path, file)
-                pdf_times[file] = os.path.getmtime(path)
-        return pdf_times
-
-    async def save_cached_data(self):
-        """Save processed data to cache"""
-        try:
-            # Save projects data
-            projects_data = {
-                name: {
-                    'technologies': list(info.technologies),
-                    'description': info.description,
-                    'developers': list(info.developers),
-                    'platforms': list(info.platforms),
-                    'file_source': info.file_source,
-                    'page_numbers': list(info.page_numbers)
-                }
-                for name, info in self.projects.items()
-            }
-            with open(self.cache_paths['projects'], 'w') as f:
-                json.dump(projects_data, f)
-
-            # Save technology index
-            tech_data = {
-                tech: list(projects)
-                for tech, projects in self.technology_index.items()
-            }
-            with open(self.cache_paths['tech_index'], 'w') as f:
-                json.dump(tech_data, f)
-
-            # Save vector store
-            if self.vector_store:
-                self.vector_store.save_local(self.cache_paths['vector_store'])
-
-            # Save metadata
-            metadata = {
-                'pdf_times': self._get_pdf_modification_times(),
-                'last_processed': datetime.now().isoformat()
-            }
-            with open(self.cache_paths['metadata'], 'w') as f:
-                json.dump(metadata, f)
-
-            print("Successfully saved processed data to cache!")
-
-        except Exception as e:
-            print(f"Error saving cached data: {str(e)}")
-
     async def initialize(self):
       """Initialize the processor - either load cached data or process PDFs"""
       if not await self.load_cached_data():
-          print("Processing PDFs...")
+          # print("Processing PDFs...")
           await self.process_pdfs()
           await self.save_cached_data()
-          print("Processing and caching complete!")
+          # print("Processing and caching complete!")

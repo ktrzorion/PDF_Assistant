@@ -4,7 +4,7 @@ import os
 import shutil
 import asyncio
 from typing import List
-from chatbot_t import PersistentProjectProcessor
+from chatbot_internal import PersistentProjectProcessor
 from dotenv import load_dotenv
 
 load_dotenv()
